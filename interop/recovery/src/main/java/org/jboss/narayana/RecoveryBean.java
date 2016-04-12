@@ -2,6 +2,7 @@ package org.jboss.narayana;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import javax.ejb.Schedule;
 import javax.ejb.Singleton;
 import javax.ejb.Startup;
 
@@ -16,6 +17,11 @@ import javax.transaction.TransactionManager;
 import javax.transaction.xa.XAResource;
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Vector;
 
@@ -62,7 +68,7 @@ public class RecoveryBean implements RecoveryRegistration {
                 }
             };
         }
-        register();
+//        register();
     }
 
     @PreDestroy
@@ -71,9 +77,13 @@ public class RecoveryBean implements RecoveryRegistration {
         unregister();
     }
 
+    @Schedule(second="*/59", minute="*", hour="*", persistent=false)
     public void register() {
         try {
-            registerRecoveryResources(isWF);
+            if (!registered) {
+                registerRecoveryResources(isWF);
+                registered = true;
+            }
         } catch (NamingException e) {
             e.printStackTrace();
         }
@@ -136,16 +146,71 @@ public class RecoveryBean implements RecoveryRegistration {
                 }
             }
         } else {
+            registerGFRecoveryResources3();
+//            (TransactionManager) new InitialContext().lookup(WL_TM).registerStaticResource(XAR_NAME, new DummyXAResource());
+        }
+    }
+
+    private void registerGFRecoveryResources() {
+
+        try {
+            Class clazz = Class.forName("com.sun.jts.CosTransactions.RecoveryManager");
+            Method method = clazz.getMethod("recoverXAResources", Enumeration.class);
+            DummyXAResource[] xars = {new DummyXAResource()};
+            Enumeration e = Collections.enumeration(Arrays.asList(xars));
+
+            method.invoke(null, e);
+        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException | InvocationTargetException ex) {
+            System.out.printf("Error registering recovery resources: %s%n", ex.getMessage());
+            ex.printStackTrace();
+        }
+    }
+
+    private void registerGFRecoveryResources2() {
+        try {
             TransactionManager tm = (TransactionManager) new InitialContext().lookup(GF_TM);
             //ResourceRecoveryManagerImpl.registerRecoveryResourceHandler(xaResource);
-            try {
-                // com.sun.enterprise.transaction.api.JavaEETransactionManager
-                java.lang.reflect.Method method = tm.getClass().getMethod("registerRecoveryResourceHandler", XAResource.class);
-                method.invoke(tm, new DummyXAResource());
-            } catch (Exception e) {
-                System.out.printf("Error registering recovery resources: %s%n", e.getMessage());
-                e.printStackTrace();
-            }
-        } //  (TransactionManager) new InitialContext().lookup(WL_TM).registerStaticResource(XAR_NAME, new DummyXAResource());
+
+            final String recoverMethod = "recover"; // "registerRecoveryResourceHandler"
+            // com.sun.enterprise.transaction.api.JavaEETransactionManager
+            java.lang.reflect.Method method = tm.getClass().getMethod(recoverMethod, XAResource.class);
+            DummyXAResource[] xars = {new DummyXAResource()};
+            method.invoke(tm, xars[0]);
+        } catch (Exception e) {
+            System.out.printf("Error registering recovery resources: %s%n", e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /*
+     * The following technique of delaying/retrying registring recovery resources is to work
+     * around a race in how the server name is set:
+     * - a glassfish xid contains the server name which initally takes the default value of
+     *   xxxP100 but after the orb interceptors, TransactionIIOPInterceptorFactory, have been
+     *   invoked it morphs into xxxP3700 (where 3700 is the iiop-listener port). 
+     * - this becomes an issue because the resulting registration xid and the recovery xid will
+     *   often be different
+     */
+    private void registerGFRecoveryResources3() {
+        try {
+            TransactionManager tm = (TransactionManager) new InitialContext().lookup(GF_TM);
+            //ResourceRecoveryManagerImpl.registerRecoveryResourceHandler(xaResource);
+
+            // access private field JavaEETransactionManager transactionManager
+            Field f = tm.getClass().getDeclaredField("transactionManager");
+            f.setAccessible(true);
+            Object actualTM = f.get(tm); // JavaEETransactionManager
+
+            final String recoverMethod = "recover"; // "registerRecoveryResourceHandler"
+            // com.sun.enterprise.transaction.api.JavaEETransactionManager
+            java.lang.reflect.Method method = actualTM.getClass().getMethod(
+                recoverMethod, new Class[] { XAResource[].class} );
+            XAResource[] xars = new XAResource[1];
+            xars[0] = new DummyXAResource();
+            method.invoke(actualTM, new Object[] { xars });
+        } catch (Exception e) {
+            System.out.printf("Error registering recovery resources: %s%n", e.getMessage());
+            e.printStackTrace();
+        }
     }
 }

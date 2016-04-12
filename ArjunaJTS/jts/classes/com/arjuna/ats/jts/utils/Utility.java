@@ -256,7 +256,8 @@ public class Utility
 		throw new IllegalStateException(jtsLogger.i18NLogger.get_nodename_null());
 	}
 
-	byte[] nodeName = TxControl.getXANodeName().getBytes();
+    boolean gfWorkaround = Boolean.getBoolean("GLASSFISH-21532-WORKAROUND");
+	byte[] nodeName = gfWorkaround ? new byte[0] : TxControl.getXANodeName().getBytes();
 
 	otid.formatID = 0;
 	otid.tid = new byte[b.length+nodeName.length];
